@@ -45,7 +45,7 @@ Go to huggingface.co
 
 Create a Read access token
 
-Replace the value of HF_TOKEN in app.py
+Replace the value of HF_TOKEN in meme.py
 
 3. Install dependencies
 bash
