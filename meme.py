@@ -1,92 +1,148 @@
 import streamlit as st
+import requests
 from PIL import Image, ImageDraw, ImageFont
-import os
-import torch
-import textwrap
-from transformers import BlipProcessor, BlipForConditionalGeneration
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from io import BytesIO
 
-# Load models with caching
-@st.cache_resource
-def load_models():
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+# Hugging Face API token
+HF_TOKEN = "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"
 
-    # Load BLIP for image captioning
-    blip_processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
-    blip_model = BlipForConditionalGeneration.from_pretrained(
-        "Salesforce/blip-image-captioning-base"
-    ).to(device)
+# -----------------------------------------------
+# Generate a caption from the uploaded image
+# -----------------------------------------------
+def generate_caption(image_bytes):
+    url = "https://api-inference.huggingface.co/models/Salesforce/blip-image-captioning-base"
+    headers = {
+        "Authorization": f"Bearer {HF_TOKEN}",
+        "Content-Type": "application/octet-stream"
+    }
+    response = requests.post(url, headers=headers, data=image_bytes)
+    result = response.json()
 
-    # Load Hermes LLM for humor
-    llm_name = "teknium/OpenHermes-2.5-Mistral-7B"
-    llm_tokenizer = AutoTokenizer.from_pretrained(llm_name)
-    llm_model = AutoModelForCausalLM.from_pretrained(
-        llm_name,
-        torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-        device_map="auto" if device == "cuda" else None
-    ).to(device)
+    if isinstance(result, list) and "generated_text" in result[0]:
+        return result[0]["generated_text"]
+    elif "error" in result:
+        raise Exception(f"Captioning API Error: {result['error']}")
+    else:
+        raise Exception(f"Unexpected response: {result}")
 
-    return blip_processor, blip_model, llm_tokenizer, llm_model, device
+# --------------------------------------------------
+# Turn caption into a funny meme caption
+# --------------------------------------------------
+def generate_meme_line(caption):
+    url = "https://api-inference.huggingface.co/models/HuggingFaceH4/zephyr-7b-alpha"
+    headers = {
+        "Authorization": f"Bearer {HF_TOKEN}",
+        "Content-Type": "application/json"
+    }
 
-blip_processor, blip_model, llm_tokenizer, llm_model, device = load_models()
+    prompt = (
+        "### Instruction:\n"
+        "Write a funny meme caption based on this image description.\n\n"
+        f"### Image Description:\n{caption}\n\n"
+        "### Meme Caption:"
+    )
 
-# Get caption from image
-def get_image_caption(image):
-    inputs = blip_processor(images=image, return_tensors="pt").to(device)
-    out = blip_model.generate(**inputs)
-    return blip_processor.decode(out[0], skip_special_tokens=True)
+    payload = {
+        "inputs": prompt,
+        "parameters": {
+            "temperature": 0.8,
+            "max_new_tokens": 60,
+            "do_sample": True,
+            "top_p": 0.95
+        }
+    }
 
-# Make the caption funny using Hermes
-def make_it_funny(caption):
-    prompt = f"Make this caption funny for a meme: '{caption}'"
-    inputs = llm_tokenizer(prompt, return_tensors="pt", truncation=True).to(device)
-    outputs = llm_model.generate(**inputs, max_new_tokens=60, do_sample=True, temperature=0.9)
-    result = llm_tokenizer.decode(outputs[0], skip_special_tokens=True)
-    return result.split(":", 1)[-1].strip()
+    response = requests.post(url, headers=headers, json=payload)
+    result = response.json()
 
-# Draw text on image
-def create_meme(image, caption, font_path="anton.ttf"):
-    image = image.convert("RGB")
-    draw = ImageDraw.Draw(image)
-    
+    if isinstance(result, list):
+        text = result[0].get("generated_text", "")
+    elif "generated_text" in result:
+        text = result["generated_text"]
+    elif "error" in result:
+        raise Exception(f"Meme Generator Error: {result['error']}")
+    else:
+        raise Exception("Unknown error from meme generation.")
+
+    if "### Meme Caption:" in text:
+        return text.split("### Meme Caption:")[-1].strip()
+    return text.strip()
+
+# -----------------------------------------------------------------
+# Add meme caption below the image (extend canvas with text)
+# -----------------------------------------------------------------
+def add_caption_below_image(image, caption_text):
+    width, height = image.size
+
     try:
-        font = ImageFont.truetype(font_path, 36)
-    except IOError:
+        font = ImageFont.truetype("arial.ttf", size=24)
+    except:
         font = ImageFont.load_default()
 
-    wrapped = textwrap.fill(caption, width=30)
-    bbox = draw.textbbox((0, 0), wrapped, font=font)
-    text_width = bbox[2] - bbox[0]
-    x = (image.width - text_width) / 2
-    y = 10
+    draw_temp = ImageDraw.Draw(Image.new("RGB", (width, 1)))
+    words = caption_text.split()
+    lines = []
+    line = ""
 
-    draw.text((x, y), wrapped, font=font, fill="white", stroke_width=2, stroke_fill="black")
-    return image
+    for word in words:
+        test_line = f"{line} {word}".strip()
+        if draw_temp.textlength(test_line, font=font) <= width - 40:
+            line = test_line
+        else:
+            lines.append(line)
+            line = word
+    lines.append(line)
 
-# Streamlit UI
-st.title("🧠 Meme Generator with AI")
-st.write("Upload an image and let BLIP + Hermes LLM generate a funny meme!")
+    line_height = font.getbbox("A")[3] - font.getbbox("A")[1] + 10
+    caption_height = line_height * len(lines) + 20
 
-uploaded_file = st.file_uploader("Upload an image", type=["jpg", "jpeg", "png"])
+    new_image = Image.new("RGB", (width, height + caption_height), color="white")
+    new_image.paste(image, (0, 0))
+    draw = ImageDraw.Draw(new_image)
 
-if uploaded_file:
-    image = Image.open(uploaded_file)
+    y = height + 10
+    for line in lines:
+        text_width = draw.textlength(line, font=font)
+        x = (width - text_width) / 2
+        draw.text((x, y), line, font=font, fill="black")
+        y += line_height
 
-    with st.spinner("Generating caption..."):
-        caption = get_image_caption(image)
+    return new_image
 
-    st.markdown(f"**Caption:** {caption}")
+# ---------------------------------------------------
+# 🌐 Streamlit Interface
+# ---------------------------------------------------
+st.title("😂 AI Meme Generator")
+st.caption("Upload an image and let the AI caption and meme it!")
 
-    with st.spinner("Making it funny..."):
-        funny_caption = make_it_funny(caption)
+uploaded_image = st.file_uploader("Upload an image (jpg/png)", type=["jpg", "jpeg", "png"])
 
-    st.markdown(f"**Funny Caption:** {funny_caption}")
+if uploaded_image:
+    image = Image.open(uploaded_image).convert("RGB")
+    st.image(image, caption="Original Image", use_column_width=True)
 
-    with st.spinner("Creating meme..."):
-        meme = create_meme(image, funny_caption)
-        st.image(meme, caption="Generated Meme")
+    with st.spinner("Generating meme..."):
+        try:
+            # Step 1: Convert image to bytes
+            with BytesIO() as buffer:
+                image.save(buffer, format="JPEG")
+                image_bytes = buffer.getvalue()
 
-        # Save and offer download
-        meme.save("meme_output.jpg")
-        with open("meme_output.jpg", "rb") as f:
-            st.download_button("📥 Download Meme", f, file_name="funny_meme.jpg", mime="image/jpeg")
+            # Step 2: Generate caption and meme
+            caption = generate_caption(image_bytes)
+            meme_text = generate_meme_line(caption)
+
+            # Step 3: Add meme to image
+            meme_image = add_caption_below_image(image, meme_text)
+
+            st.success("Meme generated successfully!")
+            st.image(meme_image, caption="Meme Image", use_column_width=True)
+            st.text_area("Meme Text", meme_text, height=100)
+
+            # Optional: Download
+            img_buffer = BytesIO()
+            meme_image.save(img_buffer, format="JPEG")
+            st.download_button("Download Meme", data=img_buffer.getvalue(), file_name="meme.jpg", mime="image/jpeg")
+
+        except Exception as e:
+            st.error(f"Something went wrong: {e}")
