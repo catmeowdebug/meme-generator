@@ -3,8 +3,8 @@ import requests
 from PIL import Image, ImageDraw, ImageFont
 from io import BytesIO
 
-# Hugging Face API token
-HF_TOKEN = "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"
+import streamlit as st
+HF_TOKEN = st.secrets["HF_TOKEN"]
 
 # -----------------------------------------------
 # Generate a caption from the uploaded image
